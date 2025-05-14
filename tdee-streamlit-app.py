@@ -7,7 +7,7 @@ KCAL_PER_KG_TISSUE = 7700
 SURPLUS_EFFICIENCY = 0.85
 DEFICIT_EFFICIENCY = 1.00
 TAU_BMR_ADAPTATION = 10.0 
-TAU_NEAT_ADAPTATION = 2.5 # Slightly increased for more gradual general adaptation
+TAU_NEAT_ADAPTATION = 2.5 
 KCAL_PER_STEP_BASE_FACTOR = 0.00062 
 
 # --- Helper Functions ---
@@ -21,28 +21,43 @@ def calculate_ffm_fm(weight_kg, body_fat_percentage):
     ffm_kg = weight_kg - fm_kg
     return ffm_kg, fm_kg
 
-def calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex):
-    if sex == "Male":
-        rmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age_years) + 5
-    else:
-        rmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age_years) - 161
+def calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg):
+    """Calculates RMR using Pontzer's FFM-based equation."""
+    if ffm_kg <= 0: return 0
+    try:
+        # Equation: exp(-0.954 + 0.707 * Ln(FFM) + 0.019 * Ln(FM)) * 238.83 (kcal/day)
+        # Ensure fm_kg is not zero for log, use a tiny value if it is.
+        fm_kg_adjusted_for_log = fm_kg if fm_kg > 0.001 else 0.001
+        
+        term_ffm = 0.707 * np.log(ffm_kg)
+        term_fm = 0.019 * np.log(fm_kg_adjusted_for_log)
+        
+        rmr_mj_day = np.exp(-0.954 + term_ffm + term_fm) # Result in MJ/day
+        rmr_kcal_day = rmr_mj_day * 238.8529999 # Convert MJ to kcal (1 MJ = 238.8529999 kcal)
+        return rmr_kcal_day
+    except Exception:
+        return 0 # Fallback
+
+def calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex): # Kept for reference / potential fallback
+    if sex == "Male": rmr = (10*weight_kg)+(6.25*height_cm)-(5*age_years)+5
+    else: rmr = (10*weight_kg)+(6.25*height_cm)-(5*age_years)-161
     return rmr
 
-def calculate_dlw_tdee(ffm_kg, fm_kg):
+def calculate_dlw_tdee(ffm_kg, fm_kg): # This is Pontzer's FFM-based TDEE
     if ffm_kg <= 0: return 0
     try:
         term_ffm = 0.916 * np.log(ffm_kg)
         term_fm = -0.030 * np.log(fm_kg if fm_kg > 0.001 else 0.001)
-        tdee = np.exp(-1.102 + term_ffm + term_fm) * 238.83
+        tdee = np.exp(-1.102 + term_ffm + term_fm) * 238.83 # kcal/day
         return tdee
     except Exception: return 0
 
-def get_pal_multiplier_for_heuristic(activity_steps): # Renamed for clarity
-    if activity_steps < 5000: return 1.2  # Sedentary
-    elif activity_steps < 7500: return 1.375 # Lightly Active
-    elif activity_steps < 10000: return 1.55 # Moderately Active
-    elif activity_steps < 12500: return 1.725 # Very Active
-    else: return 1.9 # Athlete / Extremely Active
+def get_pal_multiplier_for_heuristic(activity_steps):
+    if activity_steps < 5000: return 1.25 # Adjusted slightly for Pontzer RMR base
+    elif activity_steps < 7500: return 1.4
+    elif activity_steps < 10000: return 1.55
+    elif activity_steps < 12500: return 1.75
+    else: return 1.95
     
 def adjust_reported_intake(reported_intake_kcal, weight_trend, weight_change_rate_kg_wk):
     kcal_discrepancy_per_day = (weight_change_rate_kg_wk * KCAL_PER_KG_TISSUE) / 7.0
@@ -79,28 +94,30 @@ def calculate_ffmi_fmi(ffm_kg, fm_kg, height_m):
 # --- Main Simulation Logic (Incorporating Critical Low Intake Rule) ---
 def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     ffm_kg, fm_kg = calculate_ffm_fm(inputs['weight_kg'], inputs['body_fat_percentage'])
-    initial_bmr_mifflin = calculate_mifflin_st_jeor_rmr(inputs['weight_kg'], inputs['height_cm'], inputs['age_years'], inputs['sex'])
-    
-    # Adaptive Bounds Calculation
-    LAB = initial_bmr_mifflin * 1.2 
-    UAB = calculate_dlw_tdee(ffm_kg, fm_kg)
-    pal_for_uab_heuristic = get_pal_multiplier_for_heuristic(inputs['avg_daily_steps'])
-    if UAB == 0 or UAB < LAB * 1.1: # Heuristic if DLW is low/zero
-        UAB = initial_bmr_mifflin * pal_for_uab_heuristic * 1.05 
+    # Use Pontzer FFM-based RMR as the initial BMR baseline
+    initial_bmr_baseline = calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg)
+    if initial_bmr_baseline == 0: # Fallback if Pontzer RMR calc fails (e.g. bad inputs)
+        initial_bmr_baseline = calculate_mifflin_st_jeor_rmr(inputs['weight_kg'], inputs['height_cm'], inputs['age_years'], inputs['sex'])
         if 'streamlit_object' in inputs and inputs['streamlit_object'] is not None:
-             inputs['streamlit_object'].warning(f"DLW TDEE for UAB was low/zero. Upper Adaptive Bound set heuristically to {UAB:,.0f} kcal.")
+            inputs['streamlit_object'].warning("Pontzer FFM-RMR calculation failed or returned zero. Using Mifflin-St Jeor as initial BMR baseline.")
+    
+    LAB = initial_bmr_baseline * 1.2 
+    UAB = calculate_dlw_tdee(ffm_kg, fm_kg) # FFM-based TDEE
+    pal_for_uab_heuristic = get_pal_multiplier_for_heuristic(inputs['avg_daily_steps'])
+    if UAB == 0 or UAB < LAB * 1.05: # Ensure UAB is reasonably above LAB, or use heuristic
+        UAB = initial_bmr_baseline * pal_for_uab_heuristic * 1.05 
+        if 'streamlit_object' in inputs and inputs['streamlit_object'] is not None:
+             inputs['streamlit_object'].warning(f"DLW-TDEE for UAB was low/zero ({calculate_dlw_tdee(ffm_kg, fm_kg):.0f}). Upper Adaptive Bound set heuristically to {UAB:,.0f} kcal.")
 
     target_true_intake_for_sim = inputs['adjusted_intake']
 
-    # EAT Calculation (fixed for sim period based on initial inputs)
     kcal_per_step = KCAL_PER_STEP_BASE_FACTOR * inputs['weight_kg']
     eat_kcal_steps = inputs['avg_daily_steps'] * kcal_per_step
     eat_kcal_additional_exercise = inputs['additional_exercise_kcal_per_day']
     eat_kcal_fixed_for_sim = eat_kcal_steps + eat_kcal_additional_exercise
 
-    # Initial state (Day 0)
-    day0_bmr = initial_bmr_mifflin
-    day0_tef = calculate_tef(target_true_intake_for_sim, inputs['protein_g_per_day']) # TEF based on the new intake
+    day0_bmr = initial_bmr_baseline # Start BMR at the calculated baseline (Pontzer FFM-RMR or Mifflin)
+    day0_tef = calculate_tef(target_true_intake_for_sim, inputs['protein_g_per_day'])
     cold_kcal_fixed = calculate_cold_thermogenesis(inputs['typical_indoor_temp_f'], inputs['minutes_cold_exposure_daily'])
     day0_fever = calculate_immune_fever_effect(inputs['has_fever_illness'], inputs['peak_fever_temp_f'], day0_bmr)
     day0_neat_adaptive = 0.0
@@ -109,94 +126,84 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     current_bmr_adaptive = day0_bmr
     current_neat_adaptive_component = day0_neat_adaptive
 
-    # Critical Low Intake Check (User's new rule)
-    CRITICAL_LOW_INTAKE_THRESHOLD = initial_bmr_mifflin * 1.4 # e.g., if intake < BMR * 1.4
+    CRITICAL_LOW_INTAKE_THRESHOLD = initial_bmr_baseline * 1.35 # If intake is less than BMR * 1.35
     is_critically_low_intake = target_true_intake_for_sim < CRITICAL_LOW_INTAKE_THRESHOLD
     
-    # General physiological limits for BMR and NEAT adaptation
-    min_bmr_limit_factor = 0.80 # BMR won't drop below 80% of initial Mifflin
-    max_bmr_limit_factor = 1.15 # BMR won't rise above 115% of initial Mifflin from adaptation alone
-    min_bmr_target_limit = initial_bmr_mifflin * min_bmr_limit_factor
-    max_bmr_target_limit = initial_bmr_mifflin * max_bmr_limit_factor
-    min_neat_limit = -400 # Max NEAT downregulation
-    max_neat_limit = 700  # Max NEAT upregulation
+    min_bmr_limit_factor = 0.80; max_bmr_limit_factor = 1.15
+    min_bmr_target_limit = initial_bmr_baseline * min_bmr_limit_factor
+    max_bmr_target_limit = initial_bmr_baseline * max_bmr_limit_factor
+    min_neat_limit = -450; max_neat_limit = 700 # Adjusted min_neat_limit
 
     intake_in_adaptive_range = LAB <= target_true_intake_for_sim <= UAB
     
     daily_log = []
 
     for day in range(num_days_to_simulate):
-        # Components that depend on current_bmr_adaptive or are fixed for the day
         current_eat_kcal = eat_kcal_fixed_for_sim 
         tef_kcal = calculate_tef(target_true_intake_for_sim, inputs['protein_g_per_day'])
         fever_kcal = calculate_immune_fever_effect(inputs['has_fever_illness'], inputs['peak_fever_temp_f'], current_bmr_adaptive)
 
-        # Determine daily targets for BMR and NEAT
+        day_target_bmr = current_bmr_adaptive # Default to current if no other logic changes it
+        day_target_neat = current_neat_adaptive_component # Default to current
+
         if is_critically_low_intake:
-            # Rule: TDEE (BMR + NEAT) aims for initial_bmr_mifflin * 1.2
-            # Target BMR aims for its physiological minimum during severe restriction
-            day_target_bmr = min_bmr_target_limit
-            # Target NEAT makes up the difference for (BMR+NEAT) to hit the floor initial_bmr_mifflin * 1.2
-            # So, NEAT_target = (initial_bmr_mifflin * 1.2) - day_target_bmr
-            day_target_neat = (initial_bmr_mifflin * 1.2) - day_target_bmr
-            day_target_neat = np.clip(day_target_neat, min_neat_limit, 0) # NEAT will be negative or zero
+            day_target_bmr = min_bmr_target_limit # Aim for physiological BMR floor
+            # Target NEAT so that (BMR_target + NEAT_target) = initial_bmr_baseline * 1.2
+            target_bmr_plus_neat_floor = initial_bmr_baseline * 1.2
+            day_target_neat = target_bmr_plus_neat_floor - day_target_bmr
+            day_target_neat = np.clip(day_target_neat, min_neat_limit, 0) # NEAT is suppressed
         
         elif intake_in_adaptive_range:
-            total_adaptation_gap = target_true_intake_for_sim - TDEE_sim_start # Gap from Day 0 TDEE
-            neat_share = 0.60 if total_adaptation_gap > 0 else 0.40 # NEAT takes more of increase, less of decrease
+            total_adaptation_gap = target_true_intake_for_sim - TDEE_sim_start
+            neat_share = 0.60 if total_adaptation_gap > 0 else 0.40
             bmr_share = 1.0 - neat_share
-            
             target_total_neat_change = total_adaptation_gap * neat_share
             target_total_bmr_change = total_adaptation_gap * bmr_share
             
-            day_target_neat = np.clip(target_total_neat_change, min_neat_limit, max_neat_limit)
-            day_target_bmr = np.clip(initial_bmr_mifflin + target_total_bmr_change, min_bmr_target_limit, max_bmr_target_limit)
+            day_target_neat = np.clip(day0_neat_adaptive + target_total_neat_change, min_neat_limit, max_neat_limit)
+            day_target_bmr = np.clip(day0_bmr + target_total_bmr_change, min_bmr_target_limit, max_bmr_target_limit)
         
-        else: # Not critically low, and outside primary adaptive range (driving tissue change)
+        else: # Outside adaptive range, not critically low
             current_expenditure_for_balance = current_bmr_adaptive + tef_kcal + current_eat_kcal + current_neat_adaptive_component + cold_kcal_fixed + fever_kcal
-            energy_balance = target_true_intake_for_sim - current_expenditure_for_balance # Positive=surplus
+            energy_balance = target_true_intake_for_sim - current_expenditure_for_balance
 
             bmr_target_change_factor_ext = 0.0
             if energy_balance > 250: bmr_target_change_factor_ext = 0.05 
             elif energy_balance < -250: bmr_target_change_factor_ext = -0.10
-            day_target_bmr = initial_bmr_mifflin * (1 + bmr_target_change_factor_ext)
+            day_target_bmr = initial_bmr_baseline * (1 + bmr_target_change_factor_ext)
             day_target_bmr = np.clip(day_target_bmr, min_bmr_target_limit, max_bmr_target_limit)
 
             neat_responsiveness = 0.30
-            if inputs['avg_daily_steps'] > 10000: neat_responsiveness += 0.10; 
-            if inputs['avg_daily_steps'] < 5000: neat_responsiveness -= 0.10;
-            if inputs['avg_sleep_hours'] < 6.5: neat_responsiveness -= 0.05;
-            if inputs['uses_caffeine']: neat_responsiveness += 0.05;
+            if inputs['avg_daily_steps'] > 10000: neat_responsiveness += 0.10
+            if inputs['avg_daily_steps'] < 5000: neat_responsiveness -= 0.10
+            if inputs['avg_sleep_hours'] < 6.5: neat_responsiveness -= 0.05
+            if inputs['uses_caffeine']: neat_responsiveness += 0.05
             neat_responsiveness = np.clip(neat_responsiveness, 0.1, 0.5)
-            day_target_neat = energy_balance * neat_responsiveness # NEAT up in surplus, down in deficit
+            day_target_neat = energy_balance * neat_responsiveness
             day_target_neat = np.clip(day_target_neat, min_neat_limit, max_neat_limit)
 
-        # Adaptation Step (with front-loading for Day 1 if conditions met)
+        # Adaptation Step
         front_load_factor = 0.0
-        current_tau_bmr = TAU_BMR_ADAPTATION
-        current_tau_neat = TAU_NEAT_ADAPTATION
+        current_tau_bmr, current_tau_neat = TAU_BMR_ADAPTATION, TAU_NEAT_ADAPTATION
 
         if day == 0:
             if is_critically_low_intake:
-                front_load_factor = 0.60 # More aggressive front-load for critical low intake
-                current_tau_bmr *= 0.5 # Faster adaptation to floor
-                current_tau_neat *= 0.5
-            elif intake_in_adaptive_range and total_adaptation_gap != 0:
-                front_load_factor = 0.40 # Standard front-load for adaptive range
-
+                front_load_factor = 0.60; current_tau_bmr *= 0.5; current_tau_neat *= 0.5
+            elif intake_in_adaptive_range and (target_true_intake_for_sim - TDEE_sim_start) != 0: # Check if adaptation is needed
+                front_load_factor = 0.40
+        
         if front_load_factor > 0:
-            bmr_change_needed_total = day_target_bmr - day0_bmr
-            neat_change_needed_total = day_target_neat - day0_neat_adaptive
-            current_bmr_adaptive = day0_bmr + (bmr_change_needed_total * front_load_factor)
-            current_neat_adaptive_component = day0_neat_adaptive + (neat_change_needed_total * front_load_factor)
+            bmr_change_to_apply_day0 = (day_target_bmr - day0_bmr) * front_load_factor
+            neat_change_to_apply_day0 = (day_target_neat - day0_neat_adaptive) * front_load_factor
+            current_bmr_adaptive = day0_bmr + bmr_change_to_apply_day0
+            current_neat_adaptive_component = day0_neat_adaptive + neat_change_to_apply_day0
         else:
             delta_bmr = (day_target_bmr - current_bmr_adaptive) / current_tau_bmr
             current_bmr_adaptive += delta_bmr
             delta_neat = (day_target_neat - current_neat_adaptive_component) / current_tau_neat
             current_neat_adaptive_component += delta_neat
         
-        # Clip components to their physiological limits after each step
-        current_bmr_adaptive = np.clip(current_bmr_adaptive, min_bmr_target_limit, max_bmr_target_limit)
+        current_bmr_adaptive = np.clip(current_bmr_adaptive, min_bmr_target_limit, max_bmr_target_limit) # Clip after update
         current_neat_adaptive_component = np.clip(current_neat_adaptive_component, min_neat_limit, max_neat_limit)
 
         total_tdee_today = current_bmr_adaptive + tef_kcal + current_eat_kcal + current_neat_adaptive_component + cold_kcal_fixed + fever_kcal
@@ -215,28 +222,24 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
         "final_bmr_adaptive": current_bmr_adaptive,
         "final_neat_adaptive_component": current_neat_adaptive_component,
         "final_tdee": final_tdee_val,
-        "fixed_tef": tef_kcal, "fixed_eat": eat_kcal_fixed_for_sim, # EAT is fixed by inputs
-        "fixed_cold_thermo": cold_kcal_fixed, 
-        "fixed_fever_effect": fever_kcal if 'fever_kcal' in locals() else 0, # ensure fever_kcal is defined
+        "initial_bmr_baseline": initial_bmr_baseline, # For reference
         "LAB": LAB, "UAB": UAB, "intake_in_adaptive_range": intake_in_adaptive_range,
         "is_critically_low_intake_scenario": is_critically_low_intake
     }
     return pd.DataFrame(daily_log), final_states
 
-# --- generate_bulk_cut_assessment function ---
-# (No major changes needed here due to the above, but it will receive new info in sim_final_states)
+# --- generate_bulk_cut_assessment and project_weight_change_scenarios (largely unchanged but will use new sim outputs) ---
 def generate_bulk_cut_assessment(
     adjusted_intake, dynamic_tdee,
-    lower_bound_static_tdee, upper_bound_static_tdee, 
+    initial_bmr_baseline, # For context of BMR*1.2 floor
     ffm_kg, fm_kg, height_m, bmi, sex,
     sim_final_states 
     ):
     ffmi, fmi = calculate_ffmi_fmi(ffm_kg, fm_kg, height_m)
-    LAB = sim_final_states.get('LAB', lower_bound_static_tdee)
-    UAB = sim_final_states.get('UAB', upper_bound_static_tdee)
+    LAB = sim_final_states.get('LAB', initial_bmr_baseline * 1.2) # Use consistent LAB definition
+    UAB = sim_final_states.get('UAB', initial_bmr_baseline * 1.7) # Rough UAB if not in states
     intake_was_in_adaptive_range = sim_final_states.get('intake_in_adaptive_range', False)
     is_critical_low_intake_sim = sim_final_states.get('is_critically_low_intake_scenario', False)
-
 
     advice_primary = ""; status_caloric = ""
     daily_surplus_deficit_vs_dynamic_tdee = adjusted_intake - dynamic_tdee
@@ -247,23 +250,23 @@ def generate_bulk_cut_assessment(
     
     advice_primary = (f"Your intake ({adjusted_intake:,.0f} kcal) resulted in a caloric {status_caloric.lower()} of "
                       f"**{daily_surplus_deficit_vs_dynamic_tdee:+.0f} kcal/day** vs. your simulated dynamic TDEE "
-                      f"({dynamic_tdee:,.0f} kcal) after adaptation. This caloric state supports "
+                      f"({dynamic_tdee:,.0f} kcal) after adaptation. This supports "
                       f"{'weight gain' if status_caloric == 'Surplus' else ('weight loss' if status_caloric == 'Deficit' else 'weight maintenance')}.\n")
     
     if is_critical_low_intake_sim:
-        advice_primary += (f"Your intake was identified as critically low. The simulation aimed to adapt your TDEE (BMR+NEAT) towards a floor of "
-                           f"~{initial_bmr_mifflin*1.2:,.0f} kcal (BMR * 1.2) before TEF & EAT.\n")
+        advice_primary += (f"Your intake was critically low. The simulation adapted TDEE (BMR+NEAT) towards a floor of "
+                           f"~{initial_bmr_baseline*1.2:,.0f} kcal before fixed EAT & TEF.\n")
     elif intake_was_in_adaptive_range:
         advice_primary += (f"Your intake fell within the estimated primary metabolic adaptive range ({LAB:,.0f} - {UAB:,.0f} kcal). "
-                           "The simulation shows your TDEE has largely adapted to this intake.\n")
-    else: # Outside adaptive range but not critically low
-        advice_primary += (f"Your intake was outside the estimated primary metabolic adaptive range ({LAB:,.0f} - {UAB:,.0f} kcal). "
-                           "Some adaptation occurred, but this intake level is expected to primarily drive tissue change.\n")
+                           "TDEE largely adapted to this intake.\n")
+    else:
+        advice_primary += (f"Your intake was outside the primary adaptive range ({LAB:,.0f} - {UAB:,.0f} kcal). "
+                           "This intake level is expected to primarily drive tissue change.\n")
 
     advice_composition = ""; fmi_hr_status = ""; ffmi_hr_status = ""; ffmi_direct_bulk_triggered = False
     FMI_HIGH_RISK_HR_THRESHOLD = 10.0; FMI_VERY_LOW_RISK_HR_THRESHOLD = 3.5
     FMI_OPTIMAL_LOWER = 4.0; FMI_OPTIMAL_UPPER = 9.0
-    FFMI_DIRECT_BULK_THRESHOLD = 20.0; FFMI_LOW_HR_THRESHOLD = 17.0 # HR > 1 interpretation from graph
+    FFMI_DIRECT_BULK_THRESHOLD = 20.0; FFMI_LOW_HR_THRESHOLD = 17.0
 
     if fmi > FMI_HIGH_RISK_HR_THRESHOLD: fmi_hr_status = "High (Suggests HR > 1)"; advice_composition += f"- FMI ({fmi:.1f}): High, risk-associated. Consider fat loss.\n"
     elif fmi < FMI_VERY_LOW_RISK_HR_THRESHOLD: fmi_hr_status = "Very Low (Suggests HR > 1)"; advice_composition += f"- FMI ({fmi:.1f}): Very low. Ensure healthy/sustainable.\n"
@@ -274,7 +277,7 @@ def generate_bulk_cut_assessment(
         ffmi_direct_bulk_triggered = True; ffmi_hr_status = f"< {FFMI_DIRECT_BULK_THRESHOLD} (Direct Bulk Rec.)"
         advice_composition += f"- FFMI ({ffmi:.1f}): Below {FFMI_DIRECT_BULK_THRESHOLD}. Building lean mass is a priority.\n"
         if ffmi < FFMI_LOW_HR_THRESHOLD: advice_composition += f"  This is also in a risk-associated (HR > 1) low range.\n"
-    elif ffmi < FFMI_LOW_HR_THRESHOLD: # Only if FFMI >= 20 but still < HR-based low threshold
+    elif ffmi < FFMI_LOW_HR_THRESHOLD:
         ffmi_hr_status = "Low (Suggests HR > 1)"; advice_composition += f"- FFMI ({ffmi:.1f}): Risk-associated (HR > 1). Consider lean mass gain.\n"
     else: ffmi_hr_status = "Sufficient/Optimal (Suggests HR < 1)"; advice_composition += f"- FFMI ({ffmi:.1f}): Good to high lean mass.\n"
 
@@ -290,7 +293,7 @@ def generate_bulk_cut_assessment(
         final_recommendation = f"REC: CUT. FMI ({fmi:.1f}) high. Needs deficit."
         if status_caloric == "Surplus": final_recommendation += " Current state surplus; decrease intake."
         elif status_caloric == "Maintenance": final_recommendation += " Current state maintenance; deficit needed."
-    elif ffmi_hr_status == "Low (Suggests HR > 1)": # Implies FFMI >= 20 but still < graph-based low FFMI HR>1 threshold
+    elif ffmi_hr_status == "Low (Suggests HR > 1)":
         final_recommendation = f"REC: Consider Lean Bulk. FFMI ({ffmi:.1f}) suggests HR > 1 risk."
         if status_caloric == "Deficit": final_recommendation += " Current state deficit; adjust."
         elif status_caloric == "Maintenance": final_recommendation += " Current state maintenance; slight surplus?"
@@ -304,8 +307,8 @@ def generate_bulk_cut_assessment(
     full_advice = (f"{advice_primary}\n\n**Body Composition Insights (FMI/FFMI & Approx. HR from Chart):**\n{advice_composition}\n**Overall Strategy Guidance:**\n{final_recommendation}")
     return full_advice, overall_status_message, daily_surplus_deficit_vs_dynamic_tdee
 
-# --- project_weight_change_scenarios function remains largely the same ---
 def project_weight_change_scenarios(current_dynamic_tdee, weight_kg):
+    # ... (This function remains the same as the last full version) ...
     scenarios = []
     kcal_per_lb_wk_as_daily = 3500.0 / 7.0
     intake_targets_desc = {
@@ -331,6 +334,10 @@ def project_weight_change_scenarios(current_dynamic_tdee, weight_kg):
 
 # --- Streamlit App UI ---
 st.set_page_config(layout="wide", page_title="Advanced TDEE & Metabolic Modeler")
+# ... (UI Code is largely the same as the last full version, ensure input variable names match what the functions now expect, especially for activity)
+# Key change in UI is removing PAL dropdown and using avg_daily_steps + additional_exercise_kcal
+# The call to get_pal_multiplier_for_heuristic inside the button click logic is for the UAB fallback.
+
 st.title("💪 Advanced Dynamic TDEE & Metabolic Modeler ⚙️")
 st.markdown("""
 This tool simulates Total Daily Energy Expenditure (TDEE) by modeling metabolic adaptations.
@@ -366,8 +373,8 @@ else:
 st.sidebar.subheader("🏃‍♀️ Activity Profile (Step-Based)")
 avg_daily_steps = st.sidebar.number_input("Average Total Daily Steps (from pedometer):", min_value=0, max_value=50000, value=7500, step=100)
 additional_exercise_kcal_per_day = st.sidebar.number_input(
-    "Additional Exercise Kcal/Day (non-step based e.g. cycling, weights; or very intense cardio):",
-    min_value=0, max_value=2000, value=0, step=25, help="Estimate calories for exercises not well captured by general step counts."
+    "Additional Daily Exercise Kcal (non-step based or very intense cardio):",
+    min_value=0, max_value=2000, value=0, step=25, help="Estimate for cycling, weights, etc., not captured by general step cost."
 )
 
 st.sidebar.subheader("🍽️ Diet (Target or Current Average)")
@@ -384,11 +391,11 @@ if weight_trend != "Steady":
     if weight_unit == "lbs":
         weight_change_rate_input_val = st.sidebar.number_input(f"Rate of {weight_trend.lower()} (lbs/week):", min_value=0.01, max_value=5.0, value=default_rate_lbs, step=0.05, format="%.2f")
         weight_change_rate_kg_wk = lbs_to_kg(weight_change_rate_input_val)
-    else: # kg
+    else: 
         weight_change_rate_input_val_kg = st.sidebar.number_input(f"Rate of {weight_trend.lower()} (kg/week):", min_value=0.01, max_value=2.5, value=default_rate_kg, step=0.01, format="%.2f")
         weight_change_rate_kg_wk = weight_change_rate_input_val_kg
-        weight_change_rate_input_val = kg_to_lbs(weight_change_rate_kg_wk) 
-else: # Steady
+        weight_change_rate_input_val = kg_to_lbs(weight_change_rate_kg_wk)
+else: 
     weight_change_rate_input_val = 0.0
     weight_change_rate_kg_wk = 0.0
 
@@ -425,37 +432,40 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
         idx_col1, idx_col2 = st.columns(2)
         idx_col1.metric("Fat-Free Mass Index (FFMI)", f"{current_ffmi:.1f} kg/m²")
         idx_col2.metric("Fat Mass Index (FMI)", f"{current_fmi:.1f} kg/m²")
-
-        rmr_mifflin_static = calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex)
-        lower_bound_tdee_static_display = rmr_mifflin_static
         
-        # For UAB heuristic display if DLW fails for static range
+        initial_bmr_ref = calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg)
+        if initial_bmr_ref == 0: initial_bmr_ref = calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex)
+        
+        lower_bound_tdee_static_display = initial_bmr_ref * 1.2 # Tanked TDEE (BMR+NEAT)
+        upper_bound_tdee_static_display = calculate_dlw_tdee(ffm_kg, fm_kg) # DLW Free-living TDEE
         pal_for_UAB_display_heuristic = get_pal_multiplier_for_heuristic(avg_daily_steps)
-        upper_bound_tdee_static_display = calculate_dlw_tdee(ffm_kg, fm_kg)
-        if upper_bound_tdee_static_display == 0 or upper_bound_tdee_static_display < lower_bound_tdee_static_display * 1.2:
-            upper_bound_tdee_static_display = lower_bound_tdee_static_display * pal_for_UAB_display_heuristic * 1.05
+
+        if upper_bound_tdee_static_display == 0 or upper_bound_tdee_static_display < lower_bound_tdee_static_display * 1.1: # ensure DLW is reasonable
+            upper_bound_tdee_static_display = initial_bmr_ref * pal_for_UAB_display_heuristic * 1.05
 
         st.subheader("↔️ Estimated Static Metabolic Range (Reference Only)")
         st.markdown(f"""
-        - **Static Lower Bound (Bed-rest RMR): `{lower_bound_tdee_static_display:,.0f} kcal/day`** (Mifflin-St Jeor)
-        - **Static Upper Bound (Typical Free-living DLW Average): `{upper_bound_tdee_static_display:,.0f} kcal/day`**
+        - **Static Lower Adaptive Bound (approx. tanked BMR+NEAT): `{lower_bound_tdee_static_display:,.0f} kcal/day`** (Pontzer RMR * 1.2)
+        - **Static Upper Adaptive Bound (Typical Free-living DLW TDEE): `{upper_bound_tdee_static_display:,.0f} kcal/day`**
         """)
-        st.caption("The simulation models adaptation within a dynamically calculated primary adaptive range (LAB-UAB).")
+        st.caption("The simulation models adaptation within a dynamically calculated primary adaptive range (LAB-UAB), which is based on these concepts.")
 
         adjusted_true_intake = adjust_reported_intake(avg_daily_kcal_intake_reported, weight_trend, weight_change_rate_kg_wk)
         st.metric("Reported Avg. Daily Intake", f"{avg_daily_kcal_intake_reported:,.0f} kcal")
-
         if abs(adjusted_true_intake - avg_daily_kcal_intake_reported) > 20:
             display_rate_val_caption = weight_change_rate_input_val
-            unit_for_trend_caption = weight_unit
+            # unit_for_trend_display = weight_unit # This was the original input unit for rate
+            # If input was kg for rate, use kg, else lbs
+            unit_for_trend_display = "kg" if (weight_unit == "kg" and weight_trend != "Steady" and weight_change_rate_input_val == lbs_to_kg(weight_change_rate_kg_wk)) else "lbs"
+
+
             if weight_trend != "Steady" :
                  st.metric("Calibrated True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
-                 st.caption(f"Adjusted based on reported weight trend of {display_rate_val_caption:.2f} {unit_for_trend_caption}/week ({weight_trend}).")
-            else: # Should not be reached if diff > 20 and steady, but included for safety
+                 st.caption(f"Adjusted based on reported weight trend of {weight_change_rate_input_val:.2f} {unit_for_trend_display}/week ({weight_trend}).")
+            else:
                  st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
-        else: # No significant adjustment
+        else:
             st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
-
 
         simulation_inputs = {
             "weight_kg": weight_kg, "body_fat_percentage": body_fat_percentage,
@@ -480,7 +490,7 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
             current_dynamic_tdee = final_tdee_states['final_tdee']
             LAB_sim = final_tdee_states['LAB']; UAB_sim = final_tdee_states['UAB']
             st.metric(f"Simulated Dynamic TDEE (at Day {num_days_to_simulate})", f"{current_dynamic_tdee:,.0f} kcal/day")
-            st.caption(f"Primary Metabolic Adaptive Range used in simulation: {LAB_sim:,.0f} - {UAB_sim:,.0f} kcal/day.")
+            st.caption(f"Primary Metabolic Adaptive Range used in simulation: {LAB_sim:,.0f} - {UAB_sim:,.0f} kcal/day. Critical Low Intake mode: {'Active' if final_tdee_states.get('is_critically_low_intake_scenario') else 'Inactive'}")
 
             with st.expander("Show Detailed Daily Simulation Log & Component Breakdown"):
                 cols_to_display = [col for col in ["Day", "Target Intake", "BMR_Adaptive", "TEF", "EAT", "NEAT_Adaptive", "Cold_Thermo", "Fever_Effect", "Total_Dynamic_TDEE", "Energy_Balance_vs_TDEE", "Target_BMR_DailyStep", "Target_NEAT_DailyStep"] if col in daily_tdee_log_df.columns]
@@ -499,11 +509,13 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
             current_dynamic_tdee = (lower_bound_tdee_static_display + upper_bound_tdee_static_display) / 2.0
 
         st.subheader("🎯 Nutritional Strategy Assessment")
+        # Pass initial_bmr_baseline (which is Pontzer FFM RMR or fallback) for context in assessment
         advice, overall_status_msg, daily_surplus_deficit_val = generate_bulk_cut_assessment(
             adjusted_true_intake, current_dynamic_tdee,
-            lower_bound_tdee_static_display, upper_bound_tdee_static_display, # Pass the display static bounds
+            final_tdee_states.get('initial_bmr_baseline', rmr_mifflin_static), # Pass the actual baseline BMR used in sim
+            upper_bound_tdee_static_display, # This is just for broad context if needed
             ffm_kg, fm_kg, height_m, bmi, sex,
-            final_tdee_states
+            final_tdee_states # Pass all simulation results
         )
         
         if "SURPLUS" in overall_status_msg.upper() and "CUT" not in advice.upper(): st.success(f"{overall_status_msg}")
