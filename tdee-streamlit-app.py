@@ -2026,4 +2026,4 @@ def main():
                     cycle_df = pd.DataFrame(cycle_data)
                     
                     # Plot
-                    fig = px.line(cycle_df, x='Cycle Day', y='BMR (kcal
+                    fig = px.line(cycle_df, x='Cycle Day', y='BMR (kcal)'
