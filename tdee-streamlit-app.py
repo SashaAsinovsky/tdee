@@ -9,8 +9,8 @@ DEFICIT_EFFICIENCY = 1.00
 TAU_BMR_ADAPTATION = 10.0 
 TAU_NEAT_ADAPTATION = 2.5 
 KCAL_PER_STEP_BASE_FACTOR = 0.00062 
-SEDENTARY_WELLFED_RMR_MULTIPLIER = 1.6
-CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR = 1.2
+SEDENTARY_WELLFED_RMR_MULTIPLIER = 1.6 # For "non-locomotor NEAT & upregulation"
+CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR = 1.2 # BMR*1.2 for (BMR+NEAT) at very low intake
 
 # --- Helper Functions ---
 def kg_to_lbs(kg): return kg * 2.20462
@@ -18,90 +18,133 @@ def lbs_to_kg(lbs): return lbs / 2.20462
 def ft_in_to_cm(ft, inch): return (ft * 30.48) + (inch * 2.54)
 
 # --- Core Calculation Functions ---
-# ... (All calculation functions: calculate_ffm_fm, calculate_pontzer_ffm_based_rmr, etc.
-#      remain IDENTICAL to the previous complete script provided.
-#      They are omitted here for brevity but are assumed to be present and correct.)
 def calculate_ffm_fm(weight_kg, body_fat_percentage):
+    """Calculates Fat-Free Mass (FFM) and Fat Mass (FM) in kg."""
     fm_kg = weight_kg * (body_fat_percentage / 100.0)
     ffm_kg = weight_kg - fm_kg
     return ffm_kg, fm_kg
 
 def calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg):
+    """
+    Calculates RMR using Pontzer's FFM-based equation:
+    exp(-0.954 + 0.707 * Ln(FFM in kg) + 0.019 * Ln(FM in kg)) * 238.853 (to convert MJ to kcal)
+    """
+    if ffm_kg <= 0: return 0
+    try:
+        # Use a tiny value for fm_kg if it's zero to avoid log(0) error,
+        # as some fat mass is usually present.
+        fm_kg_adjusted_for_log = fm_kg if fm_kg > 0.001 else 0.001
+        
+        term_ffm = 0.707 * np.log(ffm_kg)
+        term_fm = 0.019 * np.log(fm_kg_adjusted_for_log)
+        
+        # The original Pontzer formula gives result in MJ/day
+        rmr_mj_day = np.exp(-0.954 + term_ffm + term_fm)
+        rmr_kcal_day = rmr_mj_day * 238.8529999 # Conversion factor from MJ to kcal
+        return rmr_kcal_day
+    except Exception:
+        # Return 0 or handle error appropriately if calculation fails
+        return 0
+
+def calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex): # Kept for fallback
+    """Calculates RMR using Mifflin-St Jeor equation."""
+    if sex == "Male":
+        rmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age_years) + 5
+    else:  # Female
+        rmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age_years) - 161
+    return rmr
+
+def calculate_dlw_tdee(ffm_kg, fm_kg): # Pontzer FFM-based TDEE
+    """
+    Calculates TDEE using Pontzer's FFM-based DLW equation:
+    exp(-1.102 + 0.916 * Ln(FFM in kg) - 0.030 * Ln(FM in kg)) * 238.83 (to convert MJ to kcal)
+    """
     if ffm_kg <= 0: return 0
     try:
         fm_kg_adjusted_for_log = fm_kg if fm_kg > 0.001 else 0.001
-        term_ffm = 0.707 * np.log(ffm_kg)
-        term_fm = 0.019 * np.log(fm_kg_adjusted_for_log)
-        rmr_mj_day = np.exp(-0.954 + term_ffm + term_fm)
-        return rmr_mj_day * 238.8529999 
-    except Exception: return 0
 
-def calculate_mifflin_st_jeor_rmr(weight_kg, height_cm, age_years, sex):
-    if sex == "Male": rmr = (10*weight_kg)+(6.25*height_cm)-(5*age_years)+5
-    else: rmr = (10*weight_kg)+(6.25*height_cm)-(5*age_years)-161
-    return rmr
-
-def calculate_dlw_tdee(ffm_kg, fm_kg): 
-    if ffm_kg <= 0: return 0
-    try:
         term_ffm = 0.916 * np.log(ffm_kg)
-        term_fm = -0.030 * np.log(fm_kg if fm_kg > 0.001 else 0.001)
-        tdee = np.exp(-1.102 + term_ffm + term_fm) * 238.83
-        return tdee
-    except Exception: return 0
+        term_fm = -0.030 * np.log(fm_kg_adjusted_for_log) # Note the negative coefficient for FM
+        
+        tdee_mj_day = np.exp(-1.102 + term_ffm + term_fm)
+        tdee_kcal_day = tdee_mj_day * 238.83 # Conversion factor from MJ to kcal
+        return tdee_kcal_day
+    except Exception:
+        return 0
 
-def get_pal_multiplier_for_heuristic(activity_steps):
+def get_pal_multiplier_for_heuristic(activity_steps): # Used for UAB fallback
+    """Maps step counts to a Physical Activity Level multiplier category."""
     if activity_steps < 5000: return 1.3 
     elif activity_steps < 7500: return 1.45
     elif activity_steps < 10000: return 1.6
     elif activity_steps < 12500: return 1.75
-    else: return 1.95
+    else: return 1.95 # Corresponds to very active / athlete
     
 def adjust_reported_intake(reported_intake_kcal, weight_trend, weight_change_rate_kg_wk):
+    """Adjusts reported intake based on weight trend to estimate true intake."""
     kcal_discrepancy_per_day = (weight_change_rate_kg_wk * KCAL_PER_KG_TISSUE) / 7.0
     adjusted_intake = reported_intake_kcal + kcal_discrepancy_per_day
     return adjusted_intake
 
 def calculate_tef(intake_kcal, protein_g):
+    """Calculates Thermic Effect of Food."""
     protein_kcal = protein_g * 4.0
     protein_percentage = (protein_kcal / intake_kcal) * 100.0 if intake_kcal > 0 else 0.0
-    tef_factor = 0.10 
-    if protein_percentage > 25.0: tef_factor = 0.15
-    elif protein_percentage > 15.0: tef_factor = 0.12
+    tef_factor = 0.10 # Default for mixed diet
+    if protein_percentage > 25.0: tef_factor = 0.15 # Higher for high protein
+    elif protein_percentage > 15.0: tef_factor = 0.12 # Moderate protein
     return intake_kcal * tef_factor
 
 def calculate_cold_thermogenesis(typical_indoor_temp_f, minutes_cold_exposure_daily):
+    """Estimates calories burned due to cold exposure."""
     k_c_per_degree_f_day = 4.0; comfort_temp_f = 68.0; cold_kcal_indoor = 0.0
     if typical_indoor_temp_f < comfort_temp_f:
         temp_diff_f_indoor = comfort_temp_f - typical_indoor_temp_f
+        # Prorate indoor cold effect by the proportion of the day spent indoors
         cold_kcal_indoor = temp_diff_f_indoor * k_c_per_degree_f_day * ((24.0*60.0 - minutes_cold_exposure_daily) / (24.0*60.0))
-    cold_kcal_outdoor = (minutes_cold_exposure_daily / 60.0) * 30.0
+    # Simplified outdoor cold exposure effect
+    cold_kcal_outdoor = (minutes_cold_exposure_daily / 60.0) * 30.0 # Assume 30 kcal/hr of mild cold exposure
     return max(0, cold_kcal_indoor) + max(0, cold_kcal_outdoor)
 
 def calculate_immune_fever_effect(has_fever_illness, peak_fever_temp_f, current_bmr_adaptive):
+    """Estimates extra calories burned due to fever."""
     if not has_fever_illness or peak_fever_temp_f <= 99.0: return 0.0
-    temp_diff_f = peak_fever_temp_f - 98.6
-    if temp_diff_f <= 0: return 0.0
+    temp_diff_f = peak_fever_temp_f - 98.6 # Normal body temp
+    if temp_diff_f <= 0: return 0.0 # No fever if not above normal
+    # Approx 6.5% RMR increase per 1°F of fever
     return current_bmr_adaptive * temp_diff_f * 0.065
 
 def calculate_ffmi_fmi(ffm_kg, fm_kg, height_m):
+    """Calculates Fat-Free Mass Index (FFMI) and Fat Mass Index (FMI)."""
     ffmi = ffm_kg / (height_m**2) if height_m > 0 and ffm_kg >=0 else 0
     fmi = fm_kg / (height_m**2) if height_m > 0 and fm_kg >=0 else 0
     return ffmi, fmi
 
 def calculate_implied_activity_breakdown(tdee_dlw, rmr_pontzer_ffm, weight_kg):
+    """Derives implied activity components from FFM-based TDEE (DLW)."""
     if tdee_dlw <= 0 or rmr_pontzer_ffm <= 0 or weight_kg <= 0:
         return 0, 0, 0, 0 
+
+    # TDEE representing a sedentary but well-fed state (RMR * 1.6)
     tdee_sedentary_wellfed_floor = rmr_pontzer_ffm * SEDENTARY_WELLFED_RMR_MULTIPLIER
-    tef_at_sedentary_floor = tdee_sedentary_wellfed_floor * 0.10
+    
+    # TEF at this sedentary well-fed floor (assuming intake matches this TDEE)
+    tef_at_sedentary_floor = tdee_sedentary_wellfed_floor * 0.10 # General 10% TEF
+    
+    # Energy for non-locomotor NEAT, immune, repair, etc., to reach the 1.6x RMR TDEE
     energy_non_locomotor_upregulation = tdee_sedentary_wellfed_floor - rmr_pontzer_ffm - tef_at_sedentary_floor
     energy_non_locomotor_upregulation = max(0, energy_non_locomotor_upregulation)
+
+    # Additional energy from DLW TDEE (if any) beyond this well-fed sedentary floor is for locomotion/exercise
     energy_for_locomotion = tdee_dlw - tdee_sedentary_wellfed_floor
-    energy_for_locomotion = max(0, energy_for_locomotion)
+    energy_for_locomotion = max(0, energy_for_locomotion) 
+
     kcal_per_step = KCAL_PER_STEP_BASE_FACTOR * weight_kg
     implied_locomotor_steps = energy_for_locomotion / kcal_per_step if kcal_per_step > 0 else 0
+    
     return energy_non_locomotor_upregulation, energy_for_locomotion, implied_locomotor_steps, tdee_sedentary_wellfed_floor
 
+# --- Main Simulation Logic ---
 def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     ffm_kg, fm_kg = calculate_ffm_fm(inputs['weight_kg'], inputs['body_fat_percentage'])
     initial_bmr_baseline = calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg)
@@ -200,8 +243,22 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
             delta_neat = (day_target_neat - current_neat_adaptive_component) / current_tau_neat
             current_neat_adaptive_component += delta_neat
         
+        # Enforce physiological limits and the BMR*1.2 floor for (BMR+NEAT) in critical low intake
         current_bmr_adaptive = np.clip(current_bmr_adaptive, min_bmr_target_limit, max_bmr_target_limit)
         current_neat_adaptive_component = np.clip(current_neat_adaptive_component, min_neat_limit, max_neat_limit)
+
+        if is_critically_low_intake:
+            bmr_plus_neat_target_floor = initial_bmr_baseline * CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR
+            # Ensure BMR is at least its own absolute minimum
+            current_bmr_adaptive = max(current_bmr_adaptive, min_bmr_target_limit)
+            # Adjust NEAT so that BMR + NEAT >= floor, respecting NEAT's own floor
+            required_neat_for_floor = bmr_plus_neat_target_floor - current_bmr_adaptive
+            current_neat_adaptive_component = max(required_neat_for_floor, min_neat_limit)
+            # If NEAT hit its floor, BMR might need to be slightly higher to maintain the sum, but not below its own min
+            if current_neat_adaptive_component == min_neat_limit:
+                current_bmr_adaptive = max(bmr_plus_neat_target_floor - min_neat_limit, min_bmr_target_limit)
+            current_bmr_adaptive = np.clip(current_bmr_adaptive, min_bmr_target_limit, max_bmr_target_limit) # Final BMR clip
+
 
         total_tdee_today = current_bmr_adaptive + tef_kcal + current_eat_kcal + current_neat_adaptive_component + cold_kcal_fixed + fever_kcal
         
@@ -225,6 +282,7 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     }
     return pd.DataFrame(daily_log), final_states
 
+# --- generate_bulk_cut_assessment (with refined FMI/FFMI HR logic) ---
 def generate_bulk_cut_assessment(
     adjusted_intake, dynamic_tdee,
     initial_bmr_baseline, 
@@ -232,8 +290,8 @@ def generate_bulk_cut_assessment(
     sim_final_states 
     ):
     ffmi, fmi = calculate_ffmi_fmi(ffm_kg, fm_kg, height_m)
-    LAB = sim_final_states.get('LAB', initial_bmr_baseline * 1.2) 
-    UAB = sim_final_states.get('UAB', initial_bmr_baseline * 1.7) 
+    LAB = sim_final_states.get('LAB', initial_bmr_baseline * CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR) 
+    UAB = sim_final_states.get('UAB', initial_bmr_baseline * 1.7) # Fallback UAB
     intake_was_in_adaptive_range = sim_final_states.get('intake_in_adaptive_range', False)
     is_critical_low_intake_sim = sim_final_states.get('is_critically_low_intake_scenario', False)
 
@@ -259,50 +317,74 @@ def generate_bulk_cut_assessment(
         advice_primary += (f"Your intake was outside the primary adaptive range ({LAB:,.0f} - {UAB:,.0f} kcal). "
                            "This intake level is expected to primarily drive tissue change.\n")
 
-    advice_composition = ""; fmi_hr_status = ""; ffmi_hr_status = ""; ffmi_direct_bulk_triggered = False
-    FMI_HIGH_RISK_HR_THRESHOLD = 10.0; FMI_VERY_LOW_RISK_HR_THRESHOLD = 3.5
-    FMI_OPTIMAL_LOWER = 4.0; FMI_OPTIMAL_UPPER = 9.0
-    FFMI_DIRECT_BULK_THRESHOLD = 20.0; FFMI_LOW_HR_THRESHOLD = 17.0
+    advice_composition = ""; fmi_hr_status_text = ""; ffmi_hr_status_text = ""; ffmi_direct_bulk_triggered = False
+    
+    # FMI Hazard Ratio Logic based on user's detailed description
+    FMI_SWEET_SPOT_LOWER = 4.0; FMI_SWEET_SPOT_UPPER = 8.0 # HR 0.8-1.0
+    FMI_MODERATE_RISK_LOWER = 3.0 # Below 4, HR ~1.2-1.4
+    FMI_MODERATE_RISK_UPPER_START = 10.0 # HR starts > 1.0
+    FMI_HIGH_RISK_1_5 = 12.0
+    FMI_HIGH_RISK_2_0 = 15.0
+    FMI_HIGH_RISK_3_0 = 20.0
 
-    if fmi > FMI_HIGH_RISK_HR_THRESHOLD: fmi_hr_status = "High (Suggests HR > 1)"; advice_composition += f"- FMI ({fmi:.1f}): High, risk-associated. Consider fat loss.\n"
-    elif fmi < FMI_VERY_LOW_RISK_HR_THRESHOLD: fmi_hr_status = "Very Low (Suggests HR > 1)"; advice_composition += f"- FMI ({fmi:.1f}): Very low. Ensure healthy/sustainable.\n"
-    elif FMI_OPTIMAL_LOWER <= fmi <= FMI_OPTIMAL_UPPER: fmi_hr_status = "Optimal (Suggests HR < 1)"; advice_composition += f"- FMI ({fmi:.1f}): Appears in a lower-risk range.\n"
-    else: fmi_hr_status = "Intermediate"; advice_composition += f"- FMI ({fmi:.1f}): Intermediate. Monitor.\n"
+    if fmi < FMI_MODERATE_RISK_LOWER: fmi_hr_status_text = f"Very Low (FMI < {FMI_MODERATE_RISK_LOWER:.0f}, HR ~1.2-1.4, slightly elevated risk)"
+    elif fmi <= FMI_SWEET_SPOT_UPPER: fmi_hr_status_text = f"Optimal (FMI {FMI_SWEET_SPOT_LOWER:.0f}-{FMI_SWEET_SPOT_UPPER:.0f}, HR ~0.8-1.0, minimal risk)"
+    elif fmi < FMI_HIGH_RISK_1_5: fmi_hr_status_text = f"Elevated (FMI > {FMI_SWEET_SPOT_UPPER:.0f}, HR > 1.0, increasing risk)"
+    elif fmi < FMI_HIGH_RISK_2_0: fmi_hr_status_text = f"High (FMI ~{FMI_HIGH_RISK_1_5:.0f}, HR ~1.5, significantly increased risk)"
+    elif fmi < FMI_HIGH_RISK_3_0: fmi_hr_status_text = f"Very High (FMI ~{FMI_HIGH_RISK_2_0:.0f}, HR ~2.0, high risk)"
+    else: fmi_hr_status_text = f"Extremely High (FMI >= {FMI_HIGH_RISK_3_0:.0f}, HR > 3.0, very high risk)"
+    advice_composition += f"- FMI: {fmi:.1f} kg/m² - Status: {fmi_hr_status_text}\n"
 
-    if ffmi < FFMI_DIRECT_BULK_THRESHOLD:
-        ffmi_direct_bulk_triggered = True; ffmi_hr_status = f"< {FFMI_DIRECT_BULK_THRESHOLD} (Direct Bulk Rec.)"
-        advice_composition += f"- FFMI ({ffmi:.1f}): Below {FFMI_DIRECT_BULK_THRESHOLD}. Building lean mass is a priority.\n"
-        if ffmi < FFMI_LOW_HR_THRESHOLD: advice_composition += f"  This is also in a risk-associated (HR > 1) low range.\n"
-    elif ffmi < FFMI_LOW_HR_THRESHOLD:
-        ffmi_hr_status = "Low (Suggests HR > 1)"; advice_composition += f"- FFMI ({ffmi:.1f}): Risk-associated (HR > 1). Consider lean mass gain.\n"
-    else: ffmi_hr_status = "Sufficient/Optimal (Suggests HR < 1)"; advice_composition += f"- FFMI ({ffmi:.1f}): Good to high lean mass.\n"
+    # FFMI Hazard Ratio Logic
+    FFMI_DIRECT_BULK_THRESHOLD = 20.0 # User's primary threshold
+    FFMI_HIGH_RISK_THRESHOLD = 15.0 # HR 2+ below this
+    FFMI_MODERATE_RISK_THRESHOLD = 18.0 # HR still > 1 below this but improving
+    FFMI_SWEET_SPOT_LOWER = 18.0; FFMI_SWEET_SPOT_UPPER = 22.0 # HR 0.8-1.0
+    FFMI_SLIGHT_INCREASE_THRESHOLD = 24.0 # HR might creep up past this
 
-    final_recommendation = ""; overall_status_message = f"Caloric: {status_caloric} | FMI: {fmi_hr_status} | FFMI: {ffmi_hr_status}"
+    if ffmi < FFMI_DIRECT_BULK_THRESHOLD: ffmi_direct_bulk_triggered = True
+    
+    if ffmi < FFMI_HIGH_RISK_THRESHOLD: ffmi_hr_status_text = f"Very Low (FFMI < {FFMI_HIGH_RISK_THRESHOLD:.0f}, HR ~2+, high risk due to frailty)"
+    elif ffmi < FFMI_MODERATE_RISK_THRESHOLD: ffmi_hr_status_text = f"Low (FFMI < {FFMI_MODERATE_RISK_THRESHOLD:.0f}, HR > 1, elevated risk)"
+    elif ffmi <= FFMI_SWEET_SPOT_UPPER: ffmi_hr_status_text = f"Optimal (FFMI {FFMI_SWEET_SPOT_LOWER:.0f}-{FFMI_SWEET_SPOT_UPPER:.0f}, HR ~0.8-1.0, protective)"
+    elif ffmi <= FFMI_SLIGHT_INCREASE_THRESHOLD: ffmi_hr_status_text = f"High/Sufficient (FFMI > {FFMI_SWEET_SPOT_UPPER:.0f}, HR ~1.0, no further longevity benefit)"
+    else: ffmi_hr_status_text = f"Very High (FFMI > {FFMI_SLIGHT_INCREASE_THRESHOLD:.0f}, HR may slightly increase, monitor)"
+    advice_composition += f"- FFMI: {ffmi:.1f} kg/m² - Status: {ffmi_hr_status_text}\n"
 
-    if ffmi_direct_bulk_triggered:
-        if fmi_hr_status == "High (Suggests HR > 1)": final_recommendation = "REC: Body Recomp/Careful Lean Bulk. FFMI low, FMI high. Complex. Consult pro."
+    final_recommendation = ""; overall_status_message = f"Caloric: {status_caloric} | FMI Risk: {fmi_hr_status_text} | FFMI Risk: {ffmi_hr_status_text}"
+
+    # Dominance logic: High FMI risk prompts cut, Low FFMI risk prompts bulk.
+    fmi_suggests_cut = fmi > FMI_SWEET_SPOT_UPPER # Simplified: if FMI is above sweet spot, cutting is generally better for HR
+    ffmi_suggests_bulk_hr = ffmi < FFMI_MODERATE_RISK_THRESHOLD # If FFMI is in a >1 HR zone
+
+    if ffmi_direct_bulk_triggered: # User rule: FFMI < 20
+        if fmi_suggests_cut and fmi > FMI_HIGH_RISK_HR_THRESHOLD: # If FMI is truly high risk
+            final_recommendation = "REC: Complex - Body Recomp/Careful Lean Bulk. FFMI is below 20, but FMI is also high risk. Prioritize resistance training. Slight surplus or maintenance. Consult a professional."
         else:
-            final_recommendation = f"REC: BULK. FFMI ({ffmi:.1f}) < {FFMI_DIRECT_BULK_THRESHOLD}. Needs surplus."
-            if status_caloric == "Deficit": final_recommendation += " Current state deficit; increase intake."
-            elif status_caloric == "Maintenance": final_recommendation += " Current state maintenance; surplus needed."
-    elif fmi_hr_status == "High (Suggests HR > 1)":
-        final_recommendation = f"REC: CUT. FMI ({fmi:.1f}) high. Needs deficit."
-        if status_caloric == "Surplus": final_recommendation += " Current state surplus; decrease intake."
-        elif status_caloric == "Maintenance": final_recommendation += " Current state maintenance; deficit needed."
-    elif ffmi_hr_status == "Low (Suggests HR > 1)":
-        final_recommendation = f"REC: Consider Lean Bulk. FFMI ({ffmi:.1f}) suggests HR > 1 risk."
-        if status_caloric == "Deficit": final_recommendation += " Current state deficit; adjust."
-        elif status_caloric == "Maintenance": final_recommendation += " Current state maintenance; slight surplus?"
-    elif status_caloric == "Surplus": final_recommendation = "REC: SURPLUS. If bulking, aligns. Monitor."
-    elif status_caloric == "Deficit": final_recommendation = "REC: DEFICIT. If cutting, aligns. Preserve muscle."
+            final_recommendation = f"REC: BULK. Your FFMI ({ffmi:.1f}) is below the {FFMI_DIRECT_BULK_THRESHOLD:.0f} kg/m² target. Focus on a caloric surplus to build lean mass."
+            if status_caloric == "Deficit": final_recommendation += " Current state is deficit; increase intake."
+            elif status_caloric == "Maintenance": final_recommendation += " Current state is maintenance; a surplus is needed."
+    elif fmi_suggests_cut and fmi > FMI_HIGH_RISK_HR_THRESHOLD: # High FMI risk takes precedence if FFMI is not < 20
+        final_recommendation = f"REC: CUT. Your FMI ({fmi:.1f}) is in a high-risk zone. Focus on a caloric deficit."
+        if status_caloric == "Surplus": final_recommendation += " Current state is surplus; decrease intake."
+        elif status_caloric == "Maintenance": final_recommendation += " Current state is maintenance; a deficit is needed."
+    elif ffmi_suggests_bulk_hr: # FFMI is not < 20, but still in a >1 HR zone
+        final_recommendation = f"REC: Consider Lean Bulk. Your FFMI ({ffmi:.1f}) is in a zone with elevated health risk (HR > 1). A caloric surplus for lean mass could be beneficial."
+        if status_caloric == "Deficit": final_recommendation += " Current state is deficit; consider adjusting to maintenance or slight surplus."
+        elif status_caloric == "Maintenance": final_recommendation += " Current state is maintenance; a slight surplus might be considered if FMI allows."
+    # Default to caloric status if no strong HR-based driver from above
+    elif status_caloric == "Surplus": final_recommendation = "REC: SURPLUS. If bulking, this aligns. Monitor body composition."
+    elif status_caloric == "Deficit": final_recommendation = "REC: DEFICIT. If cutting, this aligns. Ensure adequate protein and training."
     elif status_caloric == "Maintenance":
-        if ffmi_hr_status.startswith("Sufficient/Optimal") and fmi_hr_status.startswith("Optimal"): final_recommendation = "REC: MAINTAIN/Optimize. Healthy comp. Adjust for specific goals."
-        else: final_recommendation = "REC: MAINTAIN & RE-EVALUATE. Review FMI/FFMI for next phase."
+        if "Optimal" in fmi_hr_status_text and ("Optimal" in ffmi_hr_status_text or "Sufficient/High" in ffmi_hr_status_text) :
+             final_recommendation = "REC: MAINTAIN or Optimize. Your body composition appears to be in a healthy range. Adjust for specific goals."
+        else: final_recommendation = "REC: MAINTAIN & RE-EVALUATE. Intake supports maintenance. Review FMI/FFMI status for next phase."
     else: final_recommendation = "Review goals with FMI/FFMI context. Adjust intake."
 
-    full_advice = (f"{advice_primary}\n\n**Body Composition Insights (FMI/FFMI & Approx. HR from Chart):**\n{advice_composition}\n**Overall Strategy Guidance:**\n{final_recommendation}")
+    full_advice = (f"{advice_primary}\n\n**Body Composition Insights (FMI/FFMI & Hazard Ratio Interpretation):**\n{advice_composition}\n**Overall Strategy Guidance:**\n{final_recommendation}")
     return full_advice, overall_status_message, daily_surplus_deficit_vs_dynamic_tdee
 
+# --- project_weight_change_scenarios (no changes needed) ---
 def project_weight_change_scenarios(current_dynamic_tdee, weight_kg):
     scenarios = []
     kcal_per_lb_wk_as_daily = 3500.0 / 7.0
@@ -367,16 +449,14 @@ def init_session_state():
         st.session_state.weight_input_val_initialized = True
 init_session_state()
 
-def display_sidebar_inputs(): # This function just defines the widgets now
+def display_sidebar_inputs():
     st.sidebar.header("📝 User Inputs")
     st.sidebar.markdown("Inputs are saved for your current browser session.")
-
     unit_cols = st.sidebar.columns(2)
     unit_cols[0].radio("Weight unit:", ("kg", "lbs"), key="weight_unit", 
-                       index=["kg", "lbs"].index(st.session_state.get("weight_unit","lbs")))
+                       index=(["kg", "lbs"].index(st.session_state.weight_unit) if st.session_state.weight_unit in ["kg", "lbs"] else 0))
     unit_cols[1].radio("Height unit:", ("cm", "ft/in"), key="height_unit",
-                       index=["cm","ft/in"].index(st.session_state.get("height_unit","ft/in")))
-
+                       index=(["cm","ft/in"].index(st.session_state.height_unit) if st.session_state.height_unit in ["cm","ft/in"] else 0))
     st.sidebar.subheader("👤 Body & Demographics")
     st.sidebar.number_input(f"Current Body Weight ({st.session_state.weight_unit}):", 
                             min_value=(50.0 if st.session_state.weight_unit == "lbs" else 20.0), 
@@ -385,75 +465,58 @@ def display_sidebar_inputs(): # This function just defines the widgets now
     st.sidebar.slider("Estimated Body Fat Percentage (%):", min_value=3.0, max_value=60.0, step=0.5, format="%.1f", key="body_fat_percentage")
     st.sidebar.selectbox("Sex:", ("Male", "Female"), key="sex")
     st.sidebar.number_input("Age (years):", min_value=13, max_value=100, step=1, key="age_years")
-
     if st.session_state.height_unit == "ft/in":
         h_col1, h_col2 = st.sidebar.columns(2)
         h_col1.number_input("Height (feet):", min_value=3, max_value=8, step=1, key="feet")
         h_col2.number_input("Height (inches):", min_value=0, max_value=11, step=1, key="inches")
     else: 
         st.sidebar.number_input("Height (cm):", min_value=100.0, max_value=250.0, step=0.1, format="%.1f", key="height_cm_input")
-    
     st.sidebar.subheader(f"🏃‍♀️ Activity Profile (Step-Based) {INFO_ICON}", help="Define your typical daily physical activity.")
     st.sidebar.number_input("Average Total Daily Steps:", min_value=0, max_value=50000, step=100, key="avg_daily_steps", help="Your typical daily step count from a pedometer or fitness tracker. This is the main input for step-based EAT.")
     st.sidebar.number_input("Other Daily Exercise (non-step, kcal):",min_value=0, max_value=2000, step=25, key="other_exercise_kcal_per_day", help=TOOLTIPS["other_exercise_kcal"])
-    
     st.sidebar.subheader(f"🍽️ Diet (Target or Current Average) {INFO_ICON}", help="Your average daily food intake.")
     st.sidebar.number_input("Reported Average Daily Caloric Intake (kcal):", min_value=500, max_value=10000, step=50, key="avg_daily_kcal_intake_reported")
     st.sidebar.number_input("Protein Intake (grams per day):", min_value=0.0, max_value=500.0, step=1.0, format="%.1f", key="protein_g_per_day")
-    
     st.sidebar.subheader(f"⚖️ Observed Weight Trend {INFO_ICON}", help=TOOLTIPS["weight_change_rate"])
     st.sidebar.caption("Used to calibrate true intake from reported intake.")
     st.sidebar.selectbox("Recent Body Weight Trend:", ("Steady", "Gaining", "Losing"), key="weight_trend")
-    
     rate_help_text = "Average weekly change over last 2-4 weeks. E.g., 0.5 for gaining 0.5 units/wk, or 0.25 for losing 0.25 units/wk."
     if st.session_state.weight_trend != "Steady":
         if st.session_state.weight_unit == "lbs":
             st.sidebar.number_input(f"Rate of {st.session_state.weight_trend.lower()} (lbs/week):", min_value=0.01, max_value=5.0, step=0.05, format="%.2f", key="weight_change_rate_input_val_lbs", help=rate_help_text)
         else: 
              st.sidebar.number_input(f"Rate of {st.session_state.weight_trend.lower()} (kg/week):", min_value=0.01, max_value=2.5, step=0.01, format="%.2f", key="weight_change_rate_input_val_kg", help=rate_help_text)
-    
     st.sidebar.subheader("🌡️ Environment & Physiology")
     st.sidebar.slider("Typical Indoor Temperature (°F):", min_value=50, max_value=90, step=1, key="typical_indoor_temp_f")
     st.sidebar.number_input("Avg. Min/Day Outdoors <60°F/15°C:", min_value=0, max_value=1440, step=15, key="minutes_cold_exposure_daily")
     st.sidebar.slider("Habitual Nightly Sleep (hours):", min_value=4.0, max_value=12.0, step=0.1, format="%.1f", key="avg_sleep_hours")
     st.sidebar.checkbox("Regular Caffeine User?", key="uses_caffeine")
     st.sidebar.checkbox("Current Fever or Acute Illness?", key="has_fever_illness")
-    if st.session_state.has_fever_illness: # Only show if checked
+    if st.session_state.has_fever_illness:
         st.sidebar.number_input("Peak Fever Temp (°F):", min_value=98.6, max_value=106.0, step=0.1, format="%.1f", key="peak_fever_temp_f_input")
     st.sidebar.slider("Simulation Duration (days for TDEE graph):", 7, 90, 7, key="num_days_to_simulate")
-
 display_sidebar_inputs()
 
 st.title("💪 Advanced Dynamic TDEE & Metabolic Modeler ⚙️")
-# ... (rest of UI and main button logic as in the previous version) ...
-st.markdown("""
-This tool simulates Total Daily Energy Expenditure (TDEE) by modeling metabolic adaptations.
-It incorporates body composition health risk profiles (FMI/FFMI) for nuanced nutritional strategy insights.
-Inputs should reflect **current, stable conditions** for initial assessment, or **target conditions** for simulation.
-""")
+st.markdown("""...""") # Main intro markdown
 st.header("📊 Results & Analysis")
 
 if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_container_width=True):
     s_weight_unit = st.session_state.weight_unit
     s_height_unit = st.session_state.height_unit
     s_weight_input_val = st.session_state.weight_input_val 
-    
     if s_weight_unit == "lbs": s_weight_kg = lbs_to_kg(s_weight_input_val)
     else: s_weight_kg = s_weight_input_val
-
     s_body_fat_percentage = st.session_state.body_fat_percentage
     s_sex = st.session_state.sex
     s_age_years = st.session_state.age_years
-
     if s_height_unit == "ft/in": s_height_cm = ft_in_to_cm(st.session_state.feet, st.session_state.inches)
     else: s_height_cm = st.session_state.height_cm_input
-    
     s_avg_daily_steps = st.session_state.avg_daily_steps
     s_other_exercise_kcal_per_day = st.session_state.other_exercise_kcal_per_day
     s_avg_daily_kcal_intake_reported = st.session_state.avg_daily_kcal_intake_reported
     s_protein_g_per_day = st.session_state.protein_g_per_day
     s_weight_trend = st.session_state.weight_trend
-    
     s_weight_change_rate_display_val = 0.0 
     s_weight_change_rate_kg_wk = 0.0
     if s_weight_trend != "Steady":
@@ -463,7 +526,6 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
         else: 
             s_weight_change_rate_display_val = st.session_state.get("weight_change_rate_input_val_kg",0.0)
             s_weight_change_rate_kg_wk = s_weight_change_rate_display_val
-    
     s_typical_indoor_temp_f = st.session_state.typical_indoor_temp_f
     s_minutes_cold_exposure_daily = st.session_state.minutes_cold_exposure_daily
     s_avg_sleep_hours = st.session_state.avg_sleep_hours
@@ -531,16 +593,15 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
         st.metric("Reported Avg. Daily Intake", f"{s_avg_daily_kcal_intake_reported:,.0f} kcal")
         if abs(adjusted_true_intake - s_avg_daily_kcal_intake_reported) > 20:
             unit_for_trend_cap = s_weight_unit 
-            display_rate_val_for_cap = s_weight_change_rate_display_val 
+            display_rate_val_for_cap = s_weight_change_rate_display_val if s_weight_trend != "Steady" else 0.0
             if s_weight_trend != "Steady" :
                  st.metric("Calibrated True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal", help="Estimated from reported intake & weight trend; used as target for simulation.")
-                 # Make sure display_rate_val_for_cap has the value in the correct unit as s_weight_unit
-                 if s_weight_unit == "kg" and s_weight_trend != "Steady":
-                     display_rate_val_for_cap = st.session_state.get("weight_change_rate_input_val_kg",0.0)
-                 elif s_weight_unit == "lbs" and s_weight_trend != "Steady":
-                     display_rate_val_for_cap = st.session_state.get("weight_change_rate_input_val_lbs",0.0)
-
-                 st.caption(f"Adjusted based on reported weight trend of {display_rate_val_for_cap:.2f} {unit_for_trend_cap}/week ({s_weight_trend}).")
+                 # Ensure display_rate_val_for_cap uses the correct unit based on s_weight_unit
+                 if s_weight_unit == "kg":
+                     rate_to_display = st.session_state.get("weight_change_rate_input_val_kg",0.0)
+                 else: #lbs
+                     rate_to_display = st.session_state.get("weight_change_rate_input_val_lbs",0.0)
+                 st.caption(f"Adjusted based on reported weight trend of {rate_to_display:.2f} {unit_for_trend_cap}/week ({s_weight_trend}).")
             else: st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
         else: st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
 
@@ -629,3 +690,4 @@ st.markdown(f"""
     - **FFMI (Fat-Free Mass Index):** <span title='{TOOLTIPS["FFMI"]}'>{INFO_ICON}</span>
     - **FMI (Fat Mass Index):** <span title='{TOOLTIPS["FMI"]}'>{INFO_ICON}</span>
     """, unsafe_allow_html=True)
+
