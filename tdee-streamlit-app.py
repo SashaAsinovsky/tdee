@@ -18,6 +18,9 @@ def lbs_to_kg(lbs): return lbs / 2.20462
 def ft_in_to_cm(ft, inch): return (ft * 30.48) + (inch * 2.54)
 
 # --- Core Calculation Functions ---
+# ... (All calculation functions: calculate_ffm_fm, calculate_pontzer_ffm_based_rmr, etc.
+#      remain IDENTICAL to the previous complete script provided.
+#      They are omitted here for brevity but are assumed to be present and correct.)
 def calculate_ffm_fm(weight_kg, body_fat_percentage):
     fm_kg = weight_kg * (body_fat_percentage / 100.0)
     ffm_kg = weight_kg - fm_kg
@@ -88,7 +91,7 @@ def calculate_ffmi_fmi(ffm_kg, fm_kg, height_m):
 
 def calculate_implied_activity_breakdown(tdee_dlw, rmr_pontzer_ffm, weight_kg):
     if tdee_dlw <= 0 or rmr_pontzer_ffm <= 0 or weight_kg <= 0:
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0 
     tdee_sedentary_wellfed_floor = rmr_pontzer_ffm * SEDENTARY_WELLFED_RMR_MULTIPLIER
     tef_at_sedentary_floor = tdee_sedentary_wellfed_floor * 0.10
     energy_non_locomotor_upregulation = tdee_sedentary_wellfed_floor - rmr_pontzer_ffm - tef_at_sedentary_floor
@@ -99,7 +102,6 @@ def calculate_implied_activity_breakdown(tdee_dlw, rmr_pontzer_ffm, weight_kg):
     implied_locomotor_steps = energy_for_locomotion / kcal_per_step if kcal_per_step > 0 else 0
     return energy_non_locomotor_upregulation, energy_for_locomotion, implied_locomotor_steps, tdee_sedentary_wellfed_floor
 
-# --- Main Simulation Logic ---
 def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     ffm_kg, fm_kg = calculate_ffm_fm(inputs['weight_kg'], inputs['body_fat_percentage'])
     initial_bmr_baseline = calculate_pontzer_ffm_based_rmr(ffm_kg, fm_kg)
@@ -107,7 +109,7 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
         initial_bmr_baseline = calculate_mifflin_st_jeor_rmr(inputs['weight_kg'], inputs['height_cm'], inputs['age_years'], inputs['sex'])
         if inputs.get('streamlit_object'): inputs['streamlit_object'].warning("Pontzer FFM-RMR failed. Using Mifflin as initial BMR.")
     
-    LAB = initial_bmr_baseline * CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR
+    LAB = initial_bmr_baseline * CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR 
     UAB = calculate_dlw_tdee(ffm_kg, fm_kg)
     pal_for_uab_heuristic = get_pal_multiplier_for_heuristic(inputs['avg_daily_steps'])
     if UAB == 0 or UAB < LAB * 1.05: 
@@ -223,7 +225,6 @@ def simulate_tdee_adaptation(inputs, num_days_to_simulate=14):
     }
     return pd.DataFrame(daily_log), final_states
 
-# --- generate_bulk_cut_assessment and project_weight_change_scenarios (no changes needed) ---
 def generate_bulk_cut_assessment(
     adjusted_intake, dynamic_tdee,
     initial_bmr_baseline, 
@@ -366,28 +367,25 @@ def init_session_state():
         st.session_state.weight_input_val_initialized = True
 init_session_state()
 
-def display_sidebar_inputs():
+def display_sidebar_inputs(): # This function just defines the widgets now
     st.sidebar.header("📝 User Inputs")
     st.sidebar.markdown("Inputs are saved for your current browser session.")
-    unit_cols = st.sidebar.columns(2)
-    unit_cols[0].radio("Weight unit:", ("kg", "lbs"), key="weight_unit")
-    unit_cols[1].radio("Height unit:", ("cm", "ft/in"), key="height_unit")
-    st.sidebar.subheader("👤 Body & Demographics")
-    
-    # Determine current value for weight input based on session state
-    # This ensures that if a user changes the unit, the numerical value tries to adjust reasonably if it's the first time or looks like a unit mismatch.
-    # However, generally, st.session_state.weight_input_val will hold the last entered numeric value.
-    current_weight_for_input_widget = float(st.session_state.get("weight_input_val", 150.0 if st.session_state.get("weight_unit") == "lbs" else 68.0))
 
+    unit_cols = st.sidebar.columns(2)
+    unit_cols[0].radio("Weight unit:", ("kg", "lbs"), key="weight_unit", 
+                       index=["kg", "lbs"].index(st.session_state.get("weight_unit","lbs")))
+    unit_cols[1].radio("Height unit:", ("cm", "ft/in"), key="height_unit",
+                       index=["cm","ft/in"].index(st.session_state.get("height_unit","ft/in")))
+
+    st.sidebar.subheader("👤 Body & Demographics")
     st.sidebar.number_input(f"Current Body Weight ({st.session_state.weight_unit}):", 
                             min_value=(50.0 if st.session_state.weight_unit == "lbs" else 20.0), 
                             max_value=(700.0 if st.session_state.weight_unit == "lbs" else 300.0), 
-                            value=current_weight_for_input_widget, 
-                            step=0.1, format="%.1f", key="weight_input_val") # This key will store the numeric value directly
-
+                            step=0.1, format="%.1f", key="weight_input_val")
     st.sidebar.slider("Estimated Body Fat Percentage (%):", min_value=3.0, max_value=60.0, step=0.5, format="%.1f", key="body_fat_percentage")
     st.sidebar.selectbox("Sex:", ("Male", "Female"), key="sex")
     st.sidebar.number_input("Age (years):", min_value=13, max_value=100, step=1, key="age_years")
+
     if st.session_state.height_unit == "ft/in":
         h_col1, h_col2 = st.sidebar.columns(2)
         h_col1.number_input("Height (feet):", min_value=3, max_value=8, step=1, key="feet")
@@ -420,23 +418,25 @@ def display_sidebar_inputs():
     st.sidebar.slider("Habitual Nightly Sleep (hours):", min_value=4.0, max_value=12.0, step=0.1, format="%.1f", key="avg_sleep_hours")
     st.sidebar.checkbox("Regular Caffeine User?", key="uses_caffeine")
     st.sidebar.checkbox("Current Fever or Acute Illness?", key="has_fever_illness")
-    if st.session_state.has_fever_illness:
+    if st.session_state.has_fever_illness: # Only show if checked
         st.sidebar.number_input("Peak Fever Temp (°F):", min_value=98.6, max_value=106.0, step=0.1, format="%.1f", key="peak_fever_temp_f_input")
     st.sidebar.slider("Simulation Duration (days for TDEE graph):", 7, 90, 7, key="num_days_to_simulate")
 
-display_sidebar_inputs() # Call function to display sidebar and manage state via keys
+display_sidebar_inputs()
 
-# --- Main App Display ---
 st.title("💪 Advanced Dynamic TDEE & Metabolic Modeler ⚙️")
-st.markdown("...") # Main intro markdown
-
+# ... (rest of UI and main button logic as in the previous version) ...
+st.markdown("""
+This tool simulates Total Daily Energy Expenditure (TDEE) by modeling metabolic adaptations.
+It incorporates body composition health risk profiles (FMI/FFMI) for nuanced nutritional strategy insights.
+Inputs should reflect **current, stable conditions** for initial assessment, or **target conditions** for simulation.
+""")
 st.header("📊 Results & Analysis")
 
 if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_container_width=True):
-    # Retrieve ALL values from st.session_state using their keys
     s_weight_unit = st.session_state.weight_unit
     s_height_unit = st.session_state.height_unit
-    s_weight_input_val = st.session_state.weight_input_val # This now holds the numeric value directly
+    s_weight_input_val = st.session_state.weight_input_val 
     
     if s_weight_unit == "lbs": s_weight_kg = lbs_to_kg(s_weight_input_val)
     else: s_weight_kg = s_weight_input_val
@@ -475,7 +475,6 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
     if s_height_cm <= 0:
         st.error("Height must be a positive value. Please check your inputs.")
     else:
-        # ... (rest of the main calculation and display logic from the previous full script)
         ffm_kg, fm_kg = calculate_ffm_fm(s_weight_kg, s_body_fat_percentage)
         height_m = s_height_cm / 100.0
         bmi = s_weight_kg / (height_m**2) if height_m > 0 else 0
@@ -531,10 +530,16 @@ if st.sidebar.button("🚀 Calculate & Simulate TDEE", type="primary", use_conta
 
         st.metric("Reported Avg. Daily Intake", f"{s_avg_daily_kcal_intake_reported:,.0f} kcal")
         if abs(adjusted_true_intake - s_avg_daily_kcal_intake_reported) > 20:
-            unit_for_trend_cap = s_weight_unit if s_weight_trend != "Steady" else ""
-            display_rate_val_for_cap = s_weight_change_rate_display_val if s_weight_trend != "Steady" else ""
+            unit_for_trend_cap = s_weight_unit 
+            display_rate_val_for_cap = s_weight_change_rate_display_val 
             if s_weight_trend != "Steady" :
                  st.metric("Calibrated True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal", help="Estimated from reported intake & weight trend; used as target for simulation.")
+                 # Make sure display_rate_val_for_cap has the value in the correct unit as s_weight_unit
+                 if s_weight_unit == "kg" and s_weight_trend != "Steady":
+                     display_rate_val_for_cap = st.session_state.get("weight_change_rate_input_val_kg",0.0)
+                 elif s_weight_unit == "lbs" and s_weight_trend != "Steady":
+                     display_rate_val_for_cap = st.session_state.get("weight_change_rate_input_val_lbs",0.0)
+
                  st.caption(f"Adjusted based on reported weight trend of {display_rate_val_for_cap:.2f} {unit_for_trend_cap}/week ({s_weight_trend}).")
             else: st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
         else: st.metric("True Daily Intake (for simulation)", f"{adjusted_true_intake:,.0f} kcal")
