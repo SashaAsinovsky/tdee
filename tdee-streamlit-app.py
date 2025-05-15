@@ -5,27 +5,27 @@ import pandas as pd
 # from io import StringIO # No longer needed for profile saving
 #--- Constants and Coefficients ---
 
-KCAL_PER_KG_TISSUE = 7700  # Approx. kcal per kg of body tissue change
+KCAL_PER_KG_TISSUE=7700  # Approx. kcal per kg of body tissue change
 
-SURPLUS_EFFICIENCY = 0.85  # % of surplus calories stored (15% lost to adaptive thermogenesis)
+SURPLUS_EFFICIENCY=0.85  # % of surplus calories stored (15% lost to adaptive thermogenesis)
 
-DEFICIT_EFFICIENCY = 1.00  # % of deficit calories leading to tissue loss
-
-
-
-TAU_BMR_ADAPTATION = 10.0
-
-TAU_NEAT_ADAPTATION = 2.5 # Slightly increased for more gradual general adaptation
+DEFICIT_EFFICIENCY=1.00  # % of deficit calories leading to tissue loss
 
 
 
-KCAL_PER_STEP_BASE_FACTOR = 0.00062 # kcal per step per kg of bodyweight
+TAU_BMR_ADAPTATION=10.0
+
+TAU_NEAT_ADAPTATION=2.5 # Slightly increased for more gradual general adaptation
 
 
 
-SEDENTARY_WELLFED_RMR_MULTIPLIER = 1.6 # For "non-locomotor NEAT & upregulation" implies TDEE = RMR * 1.6 for sedentary well-fed
+KCAL_PER_STEP_BASE_FACTOR=0.00062 # kcal per step per kg of bodyweight
 
-CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR = 1.2 # BMR*1.2 for (BMR_adaptive + NEAT_adaptive) at very low intake
+
+
+SEDENTARY_WELLFED_RMR_MULTIPLIER=1.6 # For "non-locomotor NEAT & upregulation" implies TDEE = RMR * 1.6 for sedentary well-fed
+
+CRITICALLY_LOW_INTAKE_RMR_MULTIPLIER_FLOOR=1.2 # BMR*1.2 for (BMR_adaptive + NEAT_adaptive) at very low intake
 
 
 
